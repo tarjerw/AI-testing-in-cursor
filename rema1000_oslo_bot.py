@@ -6,12 +6,17 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_URLS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://lz4.overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+)
 
 
 @dataclass(frozen=True)
@@ -24,27 +29,39 @@ class Store:
 def build_query() -> str:
     return """
 [out:json][timeout:25];
-area["name"="Oslo"]["boundary"="administrative"]->.searchArea;
 (
-  node["shop"="supermarket"]["name"~"^REMA 1000", i](area.searchArea);
-  way["shop"="supermarket"]["name"~"^REMA 1000", i](area.searchArea);
-  relation["shop"="supermarket"]["name"~"^REMA 1000", i](area.searchArea);
+  node["shop"="supermarket"]["name"~"^REMA 1000", i](59.809,10.489,59.980,10.953);
+  way["shop"="supermarket"]["name"~"^REMA 1000", i](59.809,10.489,59.980,10.953);
+  relation["shop"="supermarket"]["name"~"^REMA 1000", i](59.809,10.489,59.980,10.953);
 );
 out center tags;
 """.strip()
 
 
-def fetch_stores() -> list[Store]:
+def fetch_payload() -> dict:
     data = urllib.parse.urlencode({"data": build_query()}).encode("utf-8")
-    request = urllib.request.Request(OVERPASS_URL, data=data, method="POST")
+    errors: list[str] = []
 
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Network error while calling Overpass API: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Received invalid JSON from Overpass API.") from exc
+    for attempt in range(3):
+        for url in OVERPASS_URLS:
+            request = urllib.request.Request(url, data=data, method="POST")
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                errors.append(f"{url} returned HTTP {exc.code}")
+            except urllib.error.URLError as exc:
+                errors.append(f"{url} network error: {exc}")
+            except json.JSONDecodeError:
+                errors.append(f"{url} returned invalid JSON")
+        time.sleep(1.5 * (attempt + 1))
+
+    error_summary = "; ".join(errors[-6:]) if errors else "unknown error"
+    raise RuntimeError(f"Overpass API request failed after retries: {error_summary}")
+
+
+def fetch_stores() -> list[Store]:
+    payload = fetch_payload()
 
     stores: list[Store] = []
     seen: set[tuple[str, float, float]] = set()
